@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:5.7
+    container_name: cloud1_mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpassword123
+      MYSQL_DATABASE: wordpress_db
+      MYSQL_USER: wordpress_user
+      MYSQL_PASSWORD: wordpress_pass
+    volumes:
+      - mysql_data:/var/lib/mysql
+    networks:
+      - cloud1_network
+
+  wordpress:
+    image: wordpress:latest
+    container_name: cloud1_wordpress
+    restart: always
+    ports:
+      - "80:80"
+    environment:
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_NAME: wordpress_db
+      WORDPRESS_DB_USER: wordpress_user
+      WORDPRESS_DB_PASSWORD: wordpress_pass
+    volumes:
+      - wordpress_data:/var/www/html
+    depends_on:
+      - mysql
+    networks:
+      - cloud1_network
+
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: cloud1_phpmyadmin
+    restart: always
+    ports:
+      - "8080:80"
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      MYSQL_ROOT_PASSWORD: rootpassword123
+    depends_on:
+      - mysql
+    networks:
+      - cloud1_network
+
+volumes:
+  mysql_data:
+    driver: local
+  wordpress_data:
+    driver: local
+
+networks:
+  cloud1_network:
+    driver: bridge

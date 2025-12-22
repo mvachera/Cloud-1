@@ -1,0 +1,111 @@
+---
+- name: Setup Docker environment on AWS
+  hosts: cloud_server
+  become: yes
+  
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+    
+    - name: Install required packages
+      apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - software-properties-common
+        state: present
+    
+    - name: Add Docker GPG key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+    
+    - name: Add Docker repository
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu noble stable
+        state: present
+    
+    - name: Install Docker packages
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+        update_cache: yes
+    
+    - name: Start Docker service
+      service:
+        name: docker
+        state: started
+        enabled: yes
+    
+    - name: Add ubuntu user to docker group
+      user:
+        name: ubuntu
+        groups: docker
+        append: yes
+    
+    - name: Test Docker installation
+      command: docker --version
+      register: docker_version
+    
+    - name: Display Docker version
+      debug:
+        msg: "✅ Docker installed: {{ docker_version.stdout }}"
+    
+    - name: Test Docker Compose
+      command: docker compose version
+      register: compose_version
+    
+    - name: Display Docker Compose version
+      debug:
+        msg: "✅ Docker Compose installed: {{ compose_version.stdout }}"
+
+    - name: Create project directory
+      file:
+        path: /home/ubuntu/cloud-1
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Copy docker-compose.yml to server
+      copy:
+        src: ./docker-compose.yml
+        dest: /home/ubuntu/cloud-1/docker-compose.yml
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Start Docker Compose services
+      community.docker.docker_compose_v2:
+        project_src: /home/ubuntu/cloud-1
+        state: present
+      become: yes
+      become_user: ubuntu
+
+    - name: Wait for WordPress to be ready
+      uri:
+        url: http://localhost:80
+        status_code: 200
+        timeout: 3
+      register: result
+      until: result.status == 200
+      retries: 30
+      delay: 2
+
+    - name: Display success message
+      debug:
+        msg: 
+          - "✅ Deployment successful!"
+          - "WordPress: http://{{ ansible_host }}/"
+          - "PHPMyAdmin: http://{{ ansible_host }}:8080"
+          - "MySQL user: wordpress_user"
+          - "MySQL password: wordpress_pass"
