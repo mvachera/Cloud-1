@@ -1,0 +1,9 @@
+# Never commit secrets!
+.env
+
+# Ansible
+*.retry
+
+# Cloud keys
+*.pem
+*.key
