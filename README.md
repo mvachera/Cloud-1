@@ -226,6 +226,12 @@ docker compose pull      # Télécharge nouvelles images
 docker compose up -d     # Redémarre avec nouvelles versions
 ```
 
+## 🔒 TLS/HTTPS
+
+**Non implémenté** car nécessite un nom de domaine.
+
+Le sujet indique "when possible" - avec une IP seule, les certificats SSL ne peuvent pas être délivrés par les autorités (Let's Encrypt).
+
 ## 📝 Notes importantes
 
 ### Idempotence
