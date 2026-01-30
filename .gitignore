@@ -1,11 +1,24 @@
-# Never commit secrets!
+# Secrets
 .env
+*.pem
+*.key
 
 # Ansible
 *.retry
 
-# Cloud keys
-*.pem
-*.key
-
+# Fichiers temporaires
 commande.txt
+*.log
+*.tmp
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Linux
+*~
+
+# IDE
+.vscode/
+.idea/

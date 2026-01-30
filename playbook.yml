@@ -15,7 +15,11 @@
     wordpress_db_password: "{{ lookup('env', 'WORDPRESS_DB_PASSWORD') }}"
     pma_host: "{{ lookup('env', 'PMA_HOST') }}"
     pma_port: "{{ lookup('env', 'PMA_PORT') }}"
+    domain_name: "{{ lookup('env', 'DOMAIN_NAME') }}"
+    email: "{{ lookup('env', 'CERTBOT_EMAIL') }}"
     project_dir: /home/ubuntu/cloud-1
+    nginx_config_dir: "{{ project_dir }}/nginx"
+    certbot_dir: "{{ project_dir }}/certbot"
 
   tasks:
     - name: Update apt cache
@@ -36,6 +40,7 @@
           - curl
           - gnupg
           - software-properties-common
+          - certbot
         state: present
 
     - name: Add Docker GPG key
@@ -95,6 +100,48 @@
         group: ubuntu
         mode: '0755'
 
+    - name: Create nginx config directory
+      file:
+        path: "{{ nginx_config_dir }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Create certbot directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+      loop:
+        - "{{ certbot_dir }}/conf"
+        - "{{ certbot_dir }}/www"
+
+    - name: Check if SSL certificate already exists
+      stat:
+        path: "/etc/letsencrypt/live/{{ domain_name }}/fullchain.pem"
+      register: cert_exists
+
+    - name: Generate nginx HTTP config (before certificate)
+      template:
+        src: ./nginx-wordpress.conf.j2
+        dest: "{{ nginx_config_dir }}/nginx.conf"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+      when: not cert_exists.stat.exists
+
+    - name: Generate nginx HTTPS config (after certificate)
+      template:
+        src: ./nginx-wordpress-ssl.conf.j2
+        dest: "{{ nginx_config_dir }}/nginx.conf"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+      when: cert_exists.stat.exists
+
     - name: Generate docker-compose.yml from template
       template:
         src: ./docker-compose.yml.j2
@@ -110,21 +157,82 @@
       become: yes
       become_user: ubuntu
 
-    - name: Wait for WordPress to be ready
+    - name: Wait for WordPress to be ready (HTTP mode)
       uri:
         url: http://localhost:80
-        status_code: 200
+        status_code: 200,301,302
         timeout: 3
       register: result
-      until: result.status == 200
+      until: result.status in [200, 301, 302]
+      retries: 30
+      delay: 2
+      when: not cert_exists.stat.exists
+
+    - name: Wait for WordPress to be ready (HTTPS mode)
+      uri:
+        url: http://localhost:80
+        status_code: 301,302
+        timeout: 3
+      register: result
+      until: result.status in [301, 302]
+      retries: 10
+      delay: 2
+      when: cert_exists.stat.exists
+
+    - name: Obtain SSL certificate with Certbot (first time only)
+      command: >
+        certbot certonly --standalone --non-interactive --agree-tos
+        --email {{ email }}
+        -d {{ domain_name }}
+        --pre-hook "docker compose -f {{ project_dir }}/docker-compose.yml stop nginx || true"
+        --post-hook "docker compose -f {{ project_dir }}/docker-compose.yml start nginx || true"
+      when: not cert_exists.stat.exists
+
+    - name: Switch to HTTPS nginx config
+      template:
+        src: ./nginx-wordpress-ssl.conf.j2
+        dest: "{{ nginx_config_dir }}/nginx.conf"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+      when: not cert_exists.stat.exists
+
+    - name: Restart Docker Compose services with nginx
+      community.docker.docker_compose_v2:
+        project_src: "{{ project_dir }}"
+        state: present
+        restarted: yes
+      become: yes
+      become_user: ubuntu
+
+    - name: Setup SSL certificate renewal cron job
+      cron:
+        name: "Renew Let's Encrypt certificates"
+        minute: "0"
+        hour: "3"
+        day: "*/7"
+        job: >
+          certbot renew --quiet
+          --pre-hook "docker compose -f {{ project_dir }}/docker-compose.yml stop nginx"
+          --post-hook "docker compose -f {{ project_dir }}/docker-compose.yml start nginx"
+
+    - name: Wait for HTTPS WordPress to be ready
+      uri:
+        url: https://{{ domain_name }}
+        status_code: 200
+        timeout: 3
+        validate_certs: yes
+      register: https_result
+      until: https_result.status == 200
       retries: 30
       delay: 2
 
     - name: Display success message
       debug:
         msg: 
-          - "Deployment successful!"
-          - "WordPress: http://{{ ansible_host }}/"
-          - "PHPMyAdmin: http://{{ ansible_host }}:8080"
+          - "Deployment successful with HTTPS!"
+          - "WordPress: https://{{ domain_name }}/"
+          - "PHPMyAdmin: https://{{ domain_name }}:8080"
           - "MySQL user: {{ mysql_user }}"
+          - "SSL Certificate: Active"
           - "Note: Check .env file for passwords"

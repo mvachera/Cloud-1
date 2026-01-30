@@ -1,251 +1,197 @@
-# Cloud-1 - Déploiement automatisé WordPress
+# Cloud-1 - Déploiement WordPress HTTPS automatisé
 
-Déploiement automatisé d'une stack WordPress + MySQL + PHPMyAdmin sur AWS EC2 avec Ansible et Docker.
+Stack WordPress + MySQL + PHPMyAdmin + Nginx sur AWS EC2 avec Ansible, Docker et Let's Encrypt.
 
-## 📋 Prérequis
+## Architecture
+```
+Internet → DNS → Elastic IP → Nginx (reverse proxy + SSL)
+    ├── Port 80 → Redirige vers 443
+    ├── Port 443 → WordPress (HTTPS)
+    └── Port 8080 → phpMyAdmin (HTTPS)
+        ↓
+    Docker Network (bridge)
+        ├── MySQL (interne uniquement)
+        ├── WordPress
+        ├── PHPMyAdmin
+        └── Certbot (renouvellement auto)
+```
 
-### Local
-- **Ansible** installé (`pip install ansible`)
-- **Python 3** 
-- Clé SSH AWS dans `~/.ssh/cloud-1-key.pem` (chmod 400)
+## Prérequis
 
-### AWS
-- Instance EC2 Ubuntu 24.04 LTS
-- Elastic IP configurée et associée
-- Security Group avec ports ouverts : 22 (SSH), 80 (HTTP), 8080 (PHPMyAdmin)
-- Port 3306 (MySQL) **fermé** pour sécurité
+**Local :**
+- Ansible + Python 3
+- Clé SSH AWS (`~/.ssh/cloud-1-key.pem`)
 
-## 🚀 Déploiement
+**AWS :**
+- EC2 Ubuntu 24.04 + Elastic IP
+- Security Group : ports 22 (SSH), 80, 443, 8080 ouverts
 
-### 1. Configuration initiale
+**DNS :**
+- Nom de domaine avec enregistrement A vers l'Elastic IP
 
+## Installation
 ```bash
-# Cloner le projet
-git clone <votre-repo>
+# Config
+git clone <repo>
 cd cloud-1
-
-# Créer et configurer .env avec vos passwords
 cp .env.example .env
-nano .env
 
-# Mettre à jour inventory.ini avec votre Elastic IP
-nano inventory.ini
-```
-
-### 2. Charger les variables d'environnement
-
-```bash
-source .env
-```
-
-### 3. Tester la connexion SSH
-
-```bash
+# Tester la connexion
 ansible -i inventory.ini cloud_server -m ping
-```
 
-**Résultat attendu :** `aws_server | SUCCESS => { "ping": "pong" }`
-
-### 4. Lancer le déploiement
-
-```bash
+# Déploiement
+set -a
+source .env
+set +a
 ansible-playbook -i inventory.ini playbook.yml
 ```
 
-**Durée :** ~5-10 minutes
-
-## 📁 Structure du projet
-
+## Fichiers du projet
 ```
 cloud-1/
-├── .env                      # Variables d'environnement (secrets)
-├── .gitignore               # Protection des fichiers sensibles
-├── inventory.ini            # Configuration serveurs Ansible
-├── playbook.yml             # Playbook Ansible principal
-├── docker-compose.yml.j2    # Template Docker Compose (Jinja2)
-└── README.md                # Documentation
+├── playbook.yml                  # Playbook Ansible principal
+├── docker-compose.yml.j2         # Template Docker Compose
+├── nginx-wordpress.conf.j2       # Config HTTP (validation Certbot)
+├── nginx-wordpress-ssl.conf.j2   # Config HTTPS (production)
+├── inventory.ini                 # Serveurs cibles
+├── .env                          # Secrets (gitignore)
+└── .gitignore                    # Protection fichiers sensibles
 ```
 
-## 🏗️ Architecture
+## Images Docker
 
+Toutes les images utilisent le tag `:latest` pour avoir les dernières versions :
+- `mysql:latest`
+- `wordpress:latest`
+- `phpmyadmin:latest`
+- `nginx:latest`
+- `certbot/certbot:latest`
+
+## Templates Jinja2
+
+Les fichiers `.j2` sont des templates Ansible qui permettent d'injecter dynamiquement les variables du `.env` :
+```yaml
+# Dans docker-compose.yml.j2
+MYSQL_ROOT_PASSWORD: {{ mysql_root_password }}
 ```
-Internet
-    ↓
-Elastic IP (15.x.x.x)
-    ↓
-AWS EC2 Ubuntu
-    ↓
-Docker Network (bridge)
-    ├── Container MySQL (port 3306 - interne)
-    ├── Container WordPress (port 80)
-    └── Container PHPMyAdmin (port 8080)
+
+devient après génération :
+```yaml
+# Dans docker-compose.yml sur le serveur
+MYSQL_ROOT_PASSWORD: mon_password_secret
 ```
 
-## 🔐 Sécurité
+Cela permet de séparer le code de la configuration et de ne jamais commit les secrets.
 
-### Bonnes pratiques appliquées
-- ✅ Passwords dans `.env` (jamais en dur)
-- ✅ `.gitignore` protège `.env` et `.pem`
-- ✅ MySQL accessible uniquement en interne (pas exposé sur Internet)
-- ✅ Templates Jinja2 pour injection sécurisée des variables
-- ✅ Security Group AWS restreint les accès
-
-### Fichiers sensibles à NE JAMAIS commit
+## Variables .env requises
 ```bash
-.env                    # Passwords
-*.pem                   # Clés SSH
-cloud-1-key.pem        # Clé privée AWS
+# MySQL
+MYSQL_ROOT_PASSWORD=password
+MYSQL_DATABASE=wordpress_db
+MYSQL_USER=wordpress_user
+MYSQL_PASSWORD=password
+
+# WordPress
+WORDPRESS_DB_HOST=cloud1_mysql:3306
+WORDPRESS_DB_NAME=wordpress_db
+WORDPRESS_DB_USER=wordpress_user
+WORDPRESS_DB_PASSWORD=password
+
+# phpMyAdmin
+PMA_HOST=cloud1_mysql
+PMA_PORT=3306
+
+# SSL/HTTPS
+DOMAIN_NAME=mon-domaine.ovh
+CERTBOT_EMAIL=email@example.com
 ```
 
-## 🌐 Accès aux services
+## Accès
 
-Une fois déployé, accédez aux services :
+- WordPress : `https://mon-domaine.ovh`
+- phpMyAdmin : `https://mon-domaine.ovh:8080`
 
-- **WordPress** : http://ELASTIC_IP/
-- **PHPMyAdmin** : http://ELASTIC_IP:8080/
-- **MySQL** : Accessible uniquement depuis les containers Docker (sécurisé)
+## Fonctionnement HTTPS
 
-### Identifiants PHPMyAdmin
+### Pourquoi 2 fichiers nginx ?
 
-```
-Utilisateur : root
-Password : Voir MYSQL_ROOT_PASSWORD dans .env
+**`nginx-wordpress.conf.j2` (HTTP) :**
+- Utilisé uniquement au premier déploiement
+- Permet à Certbot de valider le domaine via le challenge ACME (port 80)
+- Contient la route `/.well-known/acme-challenge/` pour Let's Encrypt
 
-OU
+**`nginx-wordpress-ssl.conf.j2` (HTTPS) :**
+- Configuration finale de production
+- Active TLS avec les certificats Let's Encrypt
+- Reverse proxy vers WordPress (443) et phpMyAdmin (8080)
+- Redirection HTTP → HTTPS
 
-Utilisateur : wordpress_user
-Password : Voir MYSQL_PASSWORD dans .env
-```
+### Processus de déploiement
 
-## 🔄 Persistance des données
+**Premier déploiement :**
+1. Playbook détecte absence de certificat
+2. Génère config HTTP (`nginx-wordpress.conf.j2`)
+3. Démarre les services Docker
+4. Certbot valide le domaine (challenge ACME sur port 80)
+5. Let's Encrypt génère les certificats
+6. Playbook génère config HTTPS (`nginx-wordpress-ssl.conf.j2`)
+7. Redémarre Nginx en mode HTTPS
 
-Les volumes Docker assurent la persistance :
-- `mysql_data` : Base de données MySQL
-- `wordpress_data` : Fichiers WordPress (thèmes, plugins, uploads)
+**Déploiements suivants :**
+- Playbook détecte certificat existant
+- Génère directement config HTTPS
+- Démarre les services en mode HTTPS
 
-**Les données persistent même après :**
-- Redémarrage de l'instance EC2 ✅
-- Redémarrage des containers ✅
-- Crash des services ✅
+**Renouvellement :**
+- Cron job automatique tous les 7 jours
+- Certificats valides 90 jours
 
-## 🐛 Troubleshooting
+## Sécurité
 
-### Voir les logs des containers
+- HTTPS obligatoire (redirection HTTP → HTTPS)
+- MySQL accessible uniquement en interne (pas exposé)
+- TLS 1.2/1.3 uniquement
+- Secrets dans `.env` (gitignore)
+- SSH EC2 restreint à mon IP
 
+## Persistence
+
+Les volumes Docker assurent la persistence :
+- `mysql_data` : base de données
+- `wordpress_data` : fichiers WordPress
+- `/etc/letsencrypt` : certificats SSL
+
+Tout persiste après reboot EC2.
+
+## Troubleshooting
 ```bash
+# Logs
 ssh ubuntu@ELASTIC_IP -i ~/.ssh/cloud-1-key.pem
 cd /home/ubuntu/cloud-1
 docker compose logs -f
-```
 
-### Redémarrer les services
+# Vérifier SSL
+sudo certbot certificates
 
-```bash
+# Redémarrer
 docker compose restart
+
+# Reset complet
+docker compose down -v
+sudo rm -rf /etc/letsencrypt/*
+# Relancer playbook
 ```
 
-### Vérifier l'état des containers
+## Concepts clés
 
-```bash
-docker compose ps
-docker compose top
-```
-
-### Nettoyer et redéployer
-
-```bash
-# Sur le serveur
-docker compose down -v    # Supprime tout (containers + volumes)
-
-# Depuis votre machine
-ansible-playbook -i inventory.ini playbook.yml
-```
-
-### Erreur "Connection timeout"
-
-**Cause :** Security Group bloque le port 22
-
-**Solution :** AWS Console → EC2 → Security Groups → Autoriser votre IP sur port 22
-
-### Erreur "Access denied" MySQL
-
-**Cause :** Mauvais identifiants ou anciennes données
-
-**Solution :** Nettoyer les volumes (`docker compose down -v`) puis redéployer
-
-## 📊 Monitoring
-
-### CloudWatch (AWS)
-Métriques disponibles automatiquement :
-- CPU Utilization
-- Network In/Out
-- Disk Read/Write
-
-**Accès :** AWS Console → CloudWatch → Metrics → EC2
-
-### Vérifier l'état des services
-
-```bash
-# Depuis le serveur
-systemctl status docker
-docker compose ps
-curl http://localhost:80        # WordPress
-curl http://localhost:8080      # PHPMyAdmin
-```
-
-## 💾 Backup & Restore
-
-### Créer un snapshot AWS
-
-```bash
-AWS Console → EC2 → Instances → Actions → Images et modèles → Créer une image
-```
-
-**Note :** Le snapshot sauvegarde tout (système + volumes Docker + base de données)
-
-### Restaurer depuis un snapshot
-
-```bash
-EC2 → Images → AMI → Sélectionner l'image → Lancer une instance
-```
-
-## 🔧 Maintenance
-
-### Mises à jour système
-
-```bash
-ssh ubuntu@ELASTIC_IP
-sudo apt update && sudo apt upgrade -y
-```
-
-### Mises à jour des images Docker
-
-```bash
-cd /home/ubuntu/cloud-1
-docker compose pull      # Télécharge nouvelles images
-docker compose up -d     # Redémarre avec nouvelles versions
-```
-
-## 🔒 TLS/HTTPS
-
-**Non implémenté** car nécessite un nom de domaine.
-
-Le sujet indique "when possible" - avec une IP seule, les certificats SSL ne peuvent pas être délivrés par les autorités (Let's Encrypt).
-
-## 📝 Notes importantes
-
-### Idempotence
-Le playbook est **idempotent** : peut être relancé plusieurs fois sans casser le système.
-
-## 🎓 Concepts clés
-
+- **Reverse proxy** : Nginx intercepte les requêtes, gère SSL, transmet aux containers
+- **SSL termination** : Nginx déchiffre HTTPS, communique en HTTP interne avec les containers
+- **Templates Jinja2** : Génération dynamique de fichiers avec injection de variables
+- **Idempotence** : Le playbook peut être relancé sans casser le système
 - **Infrastructure as Code** : Configuration versionnée et reproductible
-- **Variables Ansible** : Séparation code/configuration
-- **Templates Jinja2** : Génération dynamique de fichiers
-- **Handlers Ansible** : Restart automatique seulement si nécessaire
-- **Volumes Docker** : Persistance des données
-- **Networks Docker** : Communication inter-containers
 
-## 👤 Auteur
+---
+
+👤 **Auteur**
 
 Matheo Vacherat - Projet cloud-1 - École 42
