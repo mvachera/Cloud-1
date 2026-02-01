@@ -32,14 +32,12 @@
         upgrade: dist
         autoremove: yes
 
-    - name: Install required packages
+    - name: Install prerequisites
       apt:
         name:
-          - apt-transport-https
           - ca-certificates
           - curl
           - gnupg
-          - software-properties-common
           - certbot
         state: present
 
@@ -53,13 +51,12 @@
         repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu noble stable
         state: present
 
-    - name: Install Docker packages
+    - name: Install Docker from official repo
       apt:
         name:
           - docker-ce
           - docker-ce-cli
           - containerd.io
-          - docker-buildx-plugin
           - docker-compose-plugin
         state: present
         update_cache: yes
@@ -76,39 +73,7 @@
         groups: docker
         append: yes
 
-    - name: Test Docker installation
-      command: docker --version
-      register: docker_version
-
-    - name: Display Docker version
-      debug:
-        msg: "Docker installed: {{ docker_version.stdout }}"
-
-    - name: Test Docker Compose
-      command: docker compose version
-      register: compose_version
-
-    - name: Display Docker Compose version
-      debug:
-        msg: "Docker Compose installed: {{ compose_version.stdout }}"
-
-    - name: Create project directory
-      file:
-        path: "{{ project_dir }}"
-        state: directory
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
-
-    - name: Create nginx config directory
-      file:
-        path: "{{ nginx_config_dir }}"
-        state: directory
-        owner: ubuntu
-        group: ubuntu
-        mode: '0755'
-
-    - name: Create certbot directories
+    - name: Create project directories
       file:
         path: "{{ item }}"
         state: directory
@@ -116,15 +81,17 @@
         group: ubuntu
         mode: '0755'
       loop:
+        - "{{ project_dir }}"
+        - "{{ nginx_config_dir }}"
         - "{{ certbot_dir }}/conf"
         - "{{ certbot_dir }}/www"
 
-    - name: Check if SSL certificate already exists
+    - name: Check if SSL certificate exists
       stat:
         path: "/etc/letsencrypt/live/{{ domain_name }}/fullchain.pem"
       register: cert_exists
 
-    - name: Generate nginx HTTP config (before certificate)
+    - name: Generate nginx HTTP config (before SSL)
       template:
         src: ./nginx-wordpress.conf.j2
         dest: "{{ nginx_config_dir }}/nginx.conf"
@@ -133,7 +100,7 @@
         mode: '0644'
       when: not cert_exists.stat.exists
 
-    - name: Generate nginx HTTPS config (after certificate)
+    - name: Generate nginx HTTPS config (after SSL)
       template:
         src: ./nginx-wordpress-ssl.conf.j2
         dest: "{{ nginx_config_dir }}/nginx.conf"
@@ -142,7 +109,7 @@
         mode: '0644'
       when: cert_exists.stat.exists
 
-    - name: Generate docker-compose.yml from template
+    - name: Generate docker-compose.yml
       template:
         src: ./docker-compose.yml.j2
         dest: "{{ project_dir }}/docker-compose.yml"
@@ -154,41 +121,23 @@
       community.docker.docker_compose_v2:
         project_src: "{{ project_dir }}"
         state: present
-      become: yes
       become_user: ubuntu
 
-    - name: Wait for WordPress to be ready (HTTP mode)
-      uri:
-        url: http://localhost:80
-        status_code: 200,301,302
-        timeout: 3
-      register: result
-      until: result.status in [200, 301, 302]
-      retries: 30
-      delay: 2
-      when: not cert_exists.stat.exists
+    - name: Wait for services to initialize
+      pause:
+        seconds: 60
+        prompt: "Waiting for MySQL and WordPress to start (60 seconds)..."
 
-    - name: Wait for WordPress to be ready (HTTPS mode)
-      uri:
-        url: http://localhost:80
-        status_code: 301,302
-        timeout: 3
-      register: result
-      until: result.status in [301, 302]
-      retries: 10
-      delay: 2
-      when: cert_exists.stat.exists
-
-    - name: Obtain SSL certificate with Certbot (first time only)
+    - name: Obtain SSL certificate (first time only)
       command: >
         certbot certonly --standalone --non-interactive --agree-tos
         --email {{ email }}
         -d {{ domain_name }}
-        --pre-hook "docker compose -f {{ project_dir }}/docker-compose.yml stop nginx || true"
-        --post-hook "docker compose -f {{ project_dir }}/docker-compose.yml start nginx || true"
+        --pre-hook "docker compose -f {{ project_dir }}/docker-compose.yml stop nginx"
+        --post-hook "docker compose -f {{ project_dir }}/docker-compose.yml start nginx"
       when: not cert_exists.stat.exists
 
-    - name: Switch to HTTPS nginx config
+    - name: Update to HTTPS nginx config
       template:
         src: ./nginx-wordpress-ssl.conf.j2
         dest: "{{ nginx_config_dir }}/nginx.conf"
@@ -197,17 +146,17 @@
         mode: '0644'
       when: not cert_exists.stat.exists
 
-    - name: Restart Docker Compose services with nginx
+    - name: Restart services with HTTPS
       community.docker.docker_compose_v2:
         project_src: "{{ project_dir }}"
         state: present
         restarted: yes
-      become: yes
       become_user: ubuntu
+      when: not cert_exists.stat.exists
 
-    - name: Setup SSL certificate renewal cron job
+    - name: Setup SSL renewal cron
       cron:
-        name: "Renew Let's Encrypt certificates"
+        name: "Renew SSL certificates"
         minute: "0"
         hour: "3"
         day: "*/7"
@@ -216,23 +165,10 @@
           --pre-hook "docker compose -f {{ project_dir }}/docker-compose.yml stop nginx"
           --post-hook "docker compose -f {{ project_dir }}/docker-compose.yml start nginx"
 
-    - name: Wait for HTTPS WordPress to be ready
-      uri:
-        url: https://{{ domain_name }}
-        status_code: 200
-        timeout: 3
-        validate_certs: yes
-      register: https_result
-      until: https_result.status == 200
-      retries: 30
-      delay: 2
-
     - name: Display success message
       debug:
         msg: 
-          - "Deployment successful with HTTPS!"
-          - "WordPress: https://{{ domain_name }}/"
+          - "Deployment completed!"
+          - "WordPress: https://{{ domain_name }}"
           - "PHPMyAdmin: https://{{ domain_name }}:8080"
-          - "MySQL user: {{ mysql_user }}"
-          - "SSL Certificate: Active"
-          - "Note: Check .env file for passwords"
+          - "Please wait 1-2 minutes for services to fully start, then access your site"
