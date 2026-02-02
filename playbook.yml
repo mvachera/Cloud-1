@@ -123,11 +123,6 @@
         state: present
       become_user: ubuntu
 
-    - name: Wait for services to initialize
-      pause:
-        seconds: 60
-        prompt: "Waiting for MySQL and WordPress to start (60 seconds)..."
-
     - name: Obtain SSL certificate (first time only)
       command: >
         certbot certonly --standalone --non-interactive --agree-tos
